@@ -105,6 +105,35 @@
   #shuffleInfo.soon { color: var(--boom); }
   @keyframes reshuffle { 0% { filter: none; } 30% { filter: hue-rotate(90deg) brightness(1.15); } 100% { filter: none; } }
   #board.flash { animation: reshuffle .6s ease; }
+
+  /* ---- explosion effect ---- */
+  #fx { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 1000; }
+  .fx-flash {
+    position: fixed; inset: 0; pointer-events: none; z-index: 999;
+    background: radial-gradient(circle at var(--x) var(--y), #fff 0, #ffe066 12%, rgba(255,110,30,.65) 32%, rgba(120,0,0,.25) 60%, transparent 85%);
+    animation: fxFlash .8s ease-out forwards;
+  }
+  @keyframes fxFlash { 0% { opacity: 1; } 100% { opacity: 0; } }
+  @keyframes shake {
+    0%, 100% { transform: translate(0, 0); }
+    10% { transform: translate(-12px, 7px) rotate(-1.5deg); }
+    20% { transform: translate(11px, -9px) rotate(1.5deg); }
+    30% { transform: translate(-9px, -5px) rotate(-1deg); }
+    40% { transform: translate(8px, 8px) rotate(.8deg); }
+    50% { transform: translate(-6px, 4px); }
+    60% { transform: translate(5px, -5px); }
+    70% { transform: translate(-3px, 3px); }
+    80% { transform: translate(2px, -2px); }
+    90% { transform: translate(-1px, 1px); }
+  }
+  .game.shake { animation: shake .65s cubic-bezier(.36,.07,.19,.97); }
+  @keyframes boomCell { 0% { transform: scale(2); background: #fff3b0; } 40% { transform: scale(1.3); } 100% { transform: scale(1); } }
+  .cell.boom { animation: boomCell .5s ease-out; position: relative; z-index: 2; }
+  @keyframes minePop { 0% { transform: scale(1.7); background: #ffb347; } 100% { transform: scale(1); } }
+  .cell.mine-pop { animation: minePop .35s ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    .game.shake, .cell.boom, .cell.mine-pop { animation: none; }
+  }
 </style>
 </head>
 <body>
@@ -194,6 +223,8 @@
 
   function newGame() {
     clearInterval(timerId);
+    fxTimers.forEach(clearTimeout); fxTimers = [];
+    gameEl.classList.remove('shake');
     started = false; over = false; flags = 0; opened = 0; seconds = 0;
     timerEl.textContent = pad(0);
     minesEl.textContent = pad(cfg.m);
@@ -337,11 +368,110 @@
     updateShuffleInfo();
     faceEl.textContent = '😵';
     msgEl.textContent = '💥 踩到地雷了！再試一次吧';
+    const showMine = c => { c.el.classList.add('open'); c.el.textContent = '💣'; };
+    const others = [];
     cells.forEach((c, i) => {
-      if (c.mine && !c.flag) { c.el.classList.add('open'); c.el.textContent = '💣'; }
+      if (c.mine && !c.flag && i !== boomIdx) others.push(i);
       if (!c.mine && c.flag) { c.el.classList.add('wrong'); c.el.textContent = '❌'; }
     });
-    cells[boomIdx].el.classList.add('boom');
+    const boomCell = cells[boomIdx];
+    showMine(boomCell);
+    boomCell.el.classList.add('boom');
+
+    if (reduceMotion) { others.forEach(i => showMine(cells[i])); return; }
+
+    // Big blast at the mine that was hit.
+    const { x, y } = cellCenter(boomIdx);
+    const flash = document.createElement('div');
+    flash.className = 'fx-flash';
+    flash.style.setProperty('--x', x + 'px');
+    flash.style.setProperty('--y', y + 'px');
+    document.body.appendChild(flash);
+    flash.addEventListener('animationend', () => flash.remove());
+    gameEl.classList.remove('shake'); void gameEl.offsetWidth; gameEl.classList.add('shake');
+    explode(x, y, 1.5);
+
+    // The remaining mines go off in a chain, nearest first.
+    const bx = boomIdx % cfg.w, by = Math.floor(boomIdx / cfg.w);
+    const dist = i => Math.hypot(i % cfg.w - bx, Math.floor(i / cfg.w) - by);
+    others.sort((a, b) => dist(a) - dist(b));
+    const step = Math.min(70, 1400 / Math.max(1, others.length));
+    others.forEach((i, k) => {
+      fxTimers.push(setTimeout(() => {
+        const c = cells[i];
+        showMine(c);
+        c.el.classList.add('mine-pop');
+        const p = cellCenter(i);
+        explode(p.x, p.y, 0.35);
+      }, 250 + k * step));
+    });
+  }
+
+  // ---- explosion effect (canvas particles) ----
+  const gameEl = document.querySelector('.game');
+  const reduceMotion = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+  let fxCanvas = null, fxCtx = null, fxRunning = false, fxTimers = [];
+  let particles = [], rings = [];
+
+  function cellCenter(i) {
+    const r = cells[i].el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  function explode(x, y, power) {
+    if (!fxCanvas) {
+      fxCanvas = document.createElement('canvas');
+      fxCanvas.id = 'fx';
+      document.body.appendChild(fxCanvas);
+      fxCtx = fxCanvas.getContext('2d');
+    }
+    if (!fxRunning) {
+      const dpr = window.devicePixelRatio || 1;
+      fxCanvas.width = innerWidth * dpr;
+      fxCanvas.height = innerHeight * dpr;
+      fxCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    const n = Math.round(110 * power);
+    for (let k = 0; k < n; k++) {           // fire + sparks
+      const a = Math.random() * Math.PI * 2, s = (1.5 + Math.random() * 10) * Math.sqrt(power) * 1.3;
+      particles.push({ kind: 'fire', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1.5,
+        r: (1.5 + Math.random() * 4) * Math.sqrt(power), life: 1, decay: .012 + Math.random() * .025, hue: 10 + Math.random() * 45 });
+    }
+    for (let k = 0; k < n / 6; k++) {       // smoke
+      const a = Math.random() * Math.PI * 2, s = Math.random() * 3 * power;
+      particles.push({ kind: 'smoke', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - .8,
+        r: (6 + Math.random() * 10) * power, life: 1, decay: .02 + Math.random() * .015 });
+    }
+    rings.push({ x, y, r: 4, max: 180 * power, life: 1 });
+    if (!fxRunning) { fxRunning = true; requestAnimationFrame(fxTick); }
+  }
+
+  function fxTick() {
+    const ctx = fxCtx;
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    ctx.globalCompositeOperation = 'source-over';
+    for (const p of particles) if (p.kind === 'smoke') {
+      p.x += p.vx; p.y += p.vy; p.vx *= .97; p.vy = p.vy * .97 - .03; p.r += .5; p.life -= p.decay;
+      ctx.fillStyle = `rgba(70,70,70,${Math.max(0, p.life) * .22})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    for (const g of rings) {
+      g.r += (g.max - g.r) * .14; g.life -= .045;
+      ctx.strokeStyle = `rgba(255,210,140,${Math.max(0, g.life)})`;
+      ctx.lineWidth = 8 * Math.max(0, g.life);
+      ctx.beginPath(); ctx.arc(g.x, g.y, g.r, 0, Math.PI * 2); ctx.stroke();
+    }
+    for (const p of particles) if (p.kind === 'fire') {
+      p.x += p.vx; p.y += p.vy; p.vx *= .955; p.vy = p.vy * .955 + .18; p.life -= p.decay;
+      const l = Math.max(0, p.life);
+      ctx.fillStyle = `hsla(${p.hue},100%,${45 + l * 35}%,${l})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (.4 + l * .6), 0, Math.PI * 2); ctx.fill();
+    }
+    particles = particles.filter(p => p.life > 0);
+    rings = rings.filter(g => g.life > 0);
+    if (particles.length || rings.length) requestAnimationFrame(fxTick);
+    else { fxRunning = false; ctx.clearRect(0, 0, innerWidth, innerHeight); }
   }
 
   function checkWin() {
