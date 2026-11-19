@@ -96,6 +96,15 @@
   .custom.show { display: flex; }
   .custom input { width: 60px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; }
   .best { color: var(--muted); font-size: 13px; text-align: center; margin-top: 6px; }
+  .shuffle-bar {
+    display: flex; justify-content: center; align-items: center; gap: 8px;
+    margin-bottom: 12px; font-size: 14px; color: var(--muted);
+  }
+  .shuffle-bar select { padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; font-family: inherit; }
+  #shuffleInfo { font-weight: 600; color: var(--accent); min-width: 120px; }
+  #shuffleInfo.soon { color: var(--boom); }
+  @keyframes reshuffle { 0% { filter: none; } 30% { filter: hue-rotate(90deg) brightness(1.15); } 100% { filter: none; } }
+  #board.flash { animation: reshuffle .6s ease; }
 </style>
 </head>
 <body>
@@ -115,6 +124,18 @@
     <button id="customStart" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--panel);cursor:pointer;">開始</button>
   </div>
 
+  <div class="shuffle-bar">
+    🔀 換題間隔
+    <select id="shuffleSec">
+      <option value="10">10 秒</option>
+      <option value="20" selected>20 秒</option>
+      <option value="30">30 秒</option>
+      <option value="60">60 秒</option>
+      <option value="0">關閉</option>
+    </select>
+    <span id="shuffleInfo"></span>
+  </div>
+
   <div class="game">
     <div class="status">
       <div class="counter" id="mines" title="剩餘地雷">000</div>
@@ -129,7 +150,8 @@
   <div class="help">
     左鍵：翻開格子　｜　右鍵：插旗 / 取消<br>
     在已翻開的數字上點擊（或雙擊）：若周圍旗子數相符，自動翻開周圍格子<br>
-    手機：長按插旗　｜　第一下保證不會踩到雷
+    手機：長按插旗　｜　第一下保證不會踩到雷<br>
+    🔀 換題：每隔一段時間，未翻開的格子會重新隨機佈雷（地雷總數不變、旗子清除），已翻開的格子保留並重算數字
   </div>
 
 <script>
@@ -151,6 +173,10 @@
   let cfg = LEVELS.easy, levelKey = 'easy';
   let cells = [];        // {mine, open, flag, n, el}
   let started, over, flags, opened, seconds, timerId;
+  const shuffleSel = document.getElementById('shuffleSec');
+  const shuffleInfo = document.getElementById('shuffleInfo');
+  let shuffleLeft = 0, shuffleCount = 0;
+  const shuffleInterval = () => Number(shuffleSel.value);
 
   const pad = n => String(Math.max(-99, Math.min(999, n))).padStart(3, '0');
   const idx = (x, y) => y * cfg.w + x;
@@ -173,6 +199,8 @@
     minesEl.textContent = pad(cfg.m);
     faceEl.textContent = '🙂';
     msgEl.textContent = '';
+    shuffleLeft = shuffleInterval(); shuffleCount = 0;
+    updateShuffleInfo();
     showBest();
 
     boardEl.innerHTML = '';
@@ -206,7 +234,59 @@
 
   function startTimer() {
     started = true;
-    timerId = setInterval(() => { seconds++; timerEl.textContent = pad(seconds); }, 1000);
+    updateShuffleInfo();
+    timerId = setInterval(() => {
+      seconds++; timerEl.textContent = pad(seconds);
+      if (shuffleInterval() > 0 && !over) {
+        shuffleLeft--;
+        if (shuffleLeft <= 0) { reshuffle(); shuffleLeft = shuffleInterval(); }
+        updateShuffleInfo();
+      }
+    }, 1000);
+  }
+
+  function updateShuffleInfo() {
+    const iv = shuffleInterval();
+    shuffleInfo.classList.remove('soon');
+    if (!iv) { shuffleInfo.textContent = '（不換題）'; return; }
+    if (!started) { shuffleInfo.textContent = `開局後每 ${iv} 秒換題`; return; }
+    if (over) { shuffleInfo.textContent = `本局共換題 ${shuffleCount} 次`; return; }
+    shuffleInfo.textContent = `${shuffleLeft} 秒後換題（已換 ${shuffleCount} 次）`;
+    if (shuffleLeft <= 3) shuffleInfo.classList.add('soon');
+  }
+
+  // Re-randomise mines among the unopened cells. Opened cells stay open and safe;
+  // their numbers are recomputed. Total mine count is unchanged; flags are cleared.
+  function reshuffle() {
+    if (over || !started) return;
+    const pool = [];
+    cells.forEach((c, i) => {
+      c.mine = false;
+      if (c.flag) { c.flag = false; c.el.textContent = ''; }
+      if (!c.open) pool.push(i);
+    });
+    flags = 0;
+    minesEl.textContent = pad(cfg.m);
+    // pool.length >= cfg.m always holds, otherwise the game would already be won.
+    for (let k = 0; k < cfg.m; k++) {
+      const r = k + Math.floor(Math.random() * (pool.length - k));
+      [pool[k], pool[r]] = [pool[r], pool[k]];
+      cells[pool[k]].mine = true;
+    }
+    cells.forEach((c, i) => {
+      c.n = neighbors(i).filter(j => cells[j].mine).length;
+      if (!c.open) return;
+      c.el.className = 'cell open';
+      c.el.textContent = c.n || '';
+      if (c.n) c.el.classList.add('n' + c.n);
+    });
+    // Opened cells that are now 0 must expand, like a normal flood-fill would.
+    cells.forEach((c, i) => {
+      if (c.open && !c.n) neighbors(i).forEach(j => { if (!cells[j].open) reveal(j); });
+    });
+    shuffleCount++;
+    boardEl.classList.remove('flash'); void boardEl.offsetWidth; boardEl.classList.add('flash');
+    checkWin();
   }
 
   function reveal(i) {
@@ -254,6 +334,7 @@
   function lose(boomIdx) {
     over = true;
     clearInterval(timerId);
+    updateShuffleInfo();
     faceEl.textContent = '😵';
     msgEl.textContent = '💥 踩到地雷了！再試一次吧';
     cells.forEach((c, i) => {
@@ -267,6 +348,7 @@
     if (over || opened !== cells.length - cfg.m) return;
     over = true;
     clearInterval(timerId);
+    updateShuffleInfo();
     faceEl.textContent = '😎';
     cells.forEach(c => { if (c.mine && !c.flag) { c.flag = true; c.el.textContent = '🚩'; } });
     minesEl.textContent = pad(0);
@@ -335,6 +417,7 @@
     boardEl.addEventListener(ev, () => clearTimeout(longPressTimer), { passive: true }));
 
   faceEl.addEventListener('click', newGame);
+  shuffleSel.addEventListener('change', () => { shuffleLeft = shuffleInterval(); updateShuffleInfo(); });
 
   document.querySelectorAll('.controls button').forEach(btn => {
     btn.addEventListener('click', () => {
